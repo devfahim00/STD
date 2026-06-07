@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -8,26 +9,37 @@ void main() {
   runApp(const STDApp());
 }
 
-const Color _bg      = Color(0xFF0C0C0E);
-const Color _surface = Color(0xFF161618);
-const Color _border  = Color(0xFF252528);
-const Color _accent  = Color(0xFFED482B);
-const Color _textSub = Color(0xFF888890);
+// ── Colors ────────────────────────────────────────────────────────────────────
 
-const String _testUrl = 'https://ash-speed.hetzner.com/100MB.bin';
+const Color _bg        = Color(0xFF0A0E1A);
+const Color _surface   = Color(0xFF121828);
+const Color _border    = Color(0xFF1E2740);
+const Color _accentA   = Color(0xFF00C2FF);   // cyan
+const Color _accentB   = Color(0xFF0066FF);   // blue
+const Color _green     = Color(0xFF00E676);
+const Color _yellow    = Color(0xFFFFD740);
+const Color _red       = Color(0xFFFF5252);
+const Color _textSub   = Color(0xFF5A7090);
+const Color _textDim   = Color(0xFF2D4060);
+
+const String _testUrl  = 'https://ash-speed.hetzner.com/100MB.bin';
+const double _maxScale = 1000.0; // gauge max Mbps
+
+// ── State ─────────────────────────────────────────────────────────────────────
 
 enum TestState { idle, running, done, error }
 
 // ── Controller ────────────────────────────────────────────────────────────────
 
 class SpeedController extends ChangeNotifier {
-  TestState state = TestState.idle;
-  int threads  = 8;
-  int duration = 10;
+  TestState state    = TestState.idle;
+  int       threads  = 8;
+  int       duration = 10;
   double speedMbps = 0, peakMbps = 0, avgMbps = 0;
   double progress  = 0;
   int bytesTotal = 0, elapsedMs = 0;
   String? error;
+  final List<double> history = [];   // live speed samples for sparkline
 
   final List<http.Client> _clients = [];
   Timer? _ticker, _stopper;
@@ -41,10 +53,10 @@ class SpeedController extends ChangeNotifier {
   Future<void> toggle() async {
     if (state == TestState.running) { _finish(); return; }
     if (state == TestState.done || state == TestState.error) { reset(); return; }
-    await _start_test();
+    await _startTest();
   }
 
-  Future<void> _start_test() async {
+  Future<void> _startTest() async {
     _resetCounters();
     state = TestState.running;
     notifyListeners();
@@ -72,7 +84,6 @@ class SpeedController extends ChangeNotifier {
           bytesTotal += chunk.length;
           elapsedMs   = DateTime.now().difference(_start!).inMilliseconds;
           progress    = (elapsedMs / (duration * 1000)).clamp(0.0, 1.0);
-          notifyListeners();
         }
       } catch (_) {
       } finally {
@@ -89,6 +100,7 @@ class SpeedController extends ChangeNotifier {
     if (speedMbps > peakMbps) peakMbps = speedMbps;
     elapsedMs = DateTime.now().difference(_start!).inMilliseconds;
     progress  = (elapsedMs / (duration * 1000)).clamp(0.0, 1.0);
+    history.add(speedMbps);
     notifyListeners();
   }
 
@@ -122,6 +134,7 @@ class SpeedController extends ChangeNotifier {
     bytesTotal = elapsedMs = 0;
     error      = null;
     _lastBytes = 0;
+    history.clear();
   }
 
   void reset() {
@@ -142,16 +155,16 @@ class STDApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'STD',
+      title: 'Speed Test',
       debugShowCheckedModeBanner: false,
       theme: ThemeData.dark().copyWith(
         scaffoldBackgroundColor: _bg,
-        colorScheme: const ColorScheme.dark(primary: _accent, surface: _surface),
+        colorScheme: const ColorScheme.dark(primary: _accentA, surface: _surface),
         sliderTheme: SliderThemeData(
-          activeTrackColor: _accent,
+          activeTrackColor: _accentA,
           inactiveTrackColor: _border,
-          thumbColor: _accent,
-          overlayColor: _accent.withOpacity(0.15),
+          thumbColor: _accentA,
+          overlayColor: _accentA.withOpacity(0.15),
           trackHeight: 3,
         ),
       ),
@@ -169,33 +182,42 @@ class SpeedPage extends StatefulWidget {
 }
 
 class _SpeedPageState extends State<SpeedPage>
-    with SingleTickerProviderStateMixin {
+    with TickerProviderStateMixin {
+
   final SpeedController _ctrl = SpeedController();
-  late AnimationController _pulse;
-  late Animation<double>   _pulseAnim;
+  late AnimationController _needleCtrl;
+  late AnimationController _pulseCtrl;
+  late AnimationController _glowCtrl;
+  double _displaySpeed = 0;
 
   @override
   void initState() {
     super.initState();
-    _ctrl.addListener(() => setState(() {}));
+    _ctrl.addListener(_onUpdate);
 
-    _pulse = AnimationController(
-        vsync: this, duration: const Duration(milliseconds: 1200))
+    _needleCtrl = AnimationController(vsync: this,
+        duration: const Duration(milliseconds: 600));
+    _pulseCtrl  = AnimationController(vsync: this,
+        duration: const Duration(milliseconds: 1600))
       ..repeat(reverse: true);
-    _pulseAnim = Tween<double>(begin: 0.94, end: 1.0).animate(
-        CurvedAnimation(parent: _pulse, curve: Curves.easeInOut));
+    _glowCtrl   = AnimationController(vsync: this,
+        duration: const Duration(milliseconds: 900))
+      ..repeat(reverse: true);
+  }
+
+  void _onUpdate() {
+    final target = _ctrl.state == TestState.done
+        ? _ctrl.avgMbps : _ctrl.speedMbps;
+    setState(() { _displaySpeed = target; });
   }
 
   @override
-  void dispose() { _ctrl.dispose(); _pulse.dispose(); super.dispose(); }
-
-  Color get _stateColor {
-    switch (_ctrl.state) {
-      case TestState.running: return _accent;
-      case TestState.done:    return const Color(0xFF30D158);
-      case TestState.error:   return const Color(0xFFFF453A);
-      default:                return const Color(0xFF3A3A3E);
-    }
+  void dispose() {
+    _ctrl.dispose();
+    _needleCtrl.dispose();
+    _pulseCtrl.dispose();
+    _glowCtrl.dispose();
+    super.dispose();
   }
 
   String _fmtBytes(int b) {
@@ -207,38 +229,47 @@ class _SpeedPageState extends State<SpeedPage>
   @override
   Widget build(BuildContext context) {
     return AnnotatedRegion<SystemUiOverlayStyle>(
-      value: SystemUiOverlayStyle.light.copyWith(statusBarColor: Colors.transparent),
+      value: SystemUiOverlayStyle.light
+          .copyWith(statusBarColor: Colors.transparent),
       child: Scaffold(
-        body: SafeArea(
-          child: SingleChildScrollView(
-            padding: const EdgeInsets.fromLTRB(24, 24, 24, 32),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                _header(),
-                const SizedBox(height: 40),
-                _gauge(),
-                const SizedBox(height: 32),
-                _progressRow(),
-                const SizedBox(height: 24),
-                _statsRow(),
-                const SizedBox(height: 24),
-                _selector('Threads', '${_ctrl.threads}',
-                    _ctrl.threads.toDouble(), 1, 32,
-                    [4, 8, 16, 32], _ctrl.threads,
-                    (v) => _ctrl.setThreads(v.round()), _ctrl.setThreads),
-                const SizedBox(height: 12),
-                _selector('Duration', '${_ctrl.duration}s',
-                    _ctrl.duration.toDouble(), 5, 30,
-                    [5, 10, 15, 30], _ctrl.duration,
-                    (v) => _ctrl.setDuration(v.round()), _ctrl.setDuration),
-                if (_ctrl.state == TestState.error) ...[
-                  const SizedBox(height: 16),
-                  Center(child: Text(_ctrl.error ?? 'Unknown error',
-                      style: const TextStyle(fontSize: 12,
-                          color: Color(0xFFFF453A)))),
+        body: Container(
+          decoration: const BoxDecoration(
+            gradient: RadialGradient(
+              center: Alignment(0, -0.4),
+              radius: 1.2,
+              colors: [Color(0xFF0D1830), Color(0xFF0A0E1A)],
+            ),
+          ),
+          child: SafeArea(
+            child: SingleChildScrollView(
+              padding: const EdgeInsets.fromLTRB(20, 16, 20, 32),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  _buildHeader(),
+                  const SizedBox(height: 32),
+                  _buildGaugeMeter(),
+                  const SizedBox(height: 28),
+                  _buildSpeedDisplay(),
+                  const SizedBox(height: 20),
+                  _buildStartButton(),
+                  const SizedBox(height: 24),
+                  _buildStatsRow(),
+                  const SizedBox(height: 20),
+                  _buildProgressBar(),
+                  if (_ctrl.history.length > 2) ...[
+                    const SizedBox(height: 20),
+                    _buildSparkline(),
+                  ],
+                  const SizedBox(height: 20),
+                  _buildSettings(),
+                  if (_ctrl.state == TestState.error) ...[
+                    const SizedBox(height: 16),
+                    Center(child: Text(_ctrl.error ?? 'Unknown error',
+                        style: const TextStyle(fontSize: 12, color: _red))),
+                  ],
                 ],
-              ],
+              ),
             ),
           ),
         ),
@@ -246,96 +277,167 @@ class _SpeedPageState extends State<SpeedPage>
     );
   }
 
-  // ── Header ──
+  // ── Header ────────────────────────────────────────────────────────────────
 
-  Widget _header() {
+  Widget _buildHeader() {
     return Row(children: [
-      Image.asset('assets/logo.png', width: 30, height: 30,
-          errorBuilder: (_, __, ___) =>
-              const Icon(Icons.wifi_tethering_rounded, color: _accent, size: 30)),
-      const SizedBox(width: 10),
-      const Text('STD', style: TextStyle(fontSize: 20,
-          fontWeight: FontWeight.w800, color: Colors.white, letterSpacing: 1.5)),
-      const Spacer(),
-      // Status badge
-      AnimatedSwitcher(
-        duration: const Duration(milliseconds: 300),
-        child: _statusBadge(),
+      Container(
+        width: 36, height: 36,
+        decoration: BoxDecoration(
+          shape: BoxShape.circle,
+          gradient: const LinearGradient(
+              colors: [_accentA, _accentB],
+              begin: Alignment.topLeft, end: Alignment.bottomRight),
+          boxShadow: [BoxShadow(color: _accentA.withOpacity(0.4),
+              blurRadius: 12)],
+        ),
+        child: const Icon(Icons.speed_rounded, color: Colors.white, size: 20),
       ),
+      const SizedBox(width: 10),
+      const Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Text('SPEED TEST',
+            style: TextStyle(fontSize: 16, fontWeight: FontWeight.w900,
+                color: Colors.white, letterSpacing: 2.5)),
+        Text('Download Speed Meter',
+            style: TextStyle(fontSize: 10, color: _textSub, letterSpacing: 0.5)),
+      ]),
+      const Spacer(),
+      _buildStatusChip(),
     ]);
   }
 
-  Widget _statusBadge() {
+  Widget _buildStatusChip() {
+    Color c; String t;
     switch (_ctrl.state) {
-      case TestState.running:
-        return _badge('Testing...', _accent);
-      case TestState.done:
-        return _badge('Done  ✓', const Color(0xFF30D158));
-      case TestState.error:
-        return _badge('Error', const Color(0xFFFF453A));
-      default:
-        return _badge('Tap to start', _textSub);
+      case TestState.running: c = _accentA; t = 'LIVE';   break;
+      case TestState.done:    c = _green;   t = 'DONE';   break;
+      case TestState.error:   c = _red;     t = 'ERROR';  break;
+      default:                c = _textSub; t = 'READY';
     }
-  }
-
-  Widget _badge(String text, Color color) {
-    return Container(
-      key: ValueKey(text),
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 5),
-      decoration: BoxDecoration(
-        color: color.withOpacity(0.1),
-        borderRadius: BorderRadius.circular(20),
-        border: Border.all(color: color.withOpacity(0.3)),
+    return AnimatedBuilder(
+      animation: _pulseCtrl,
+      builder: (_, child) => Opacity(
+        opacity: _ctrl.state == TestState.running
+            ? 0.6 + 0.4 * _pulseCtrl.value : 1.0,
+        child: child,
       ),
-      child: Text(text, style: TextStyle(fontSize: 12,
-          fontWeight: FontWeight.w600, color: color)),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+        decoration: BoxDecoration(
+          color: c.withOpacity(0.12),
+          borderRadius: BorderRadius.circular(20),
+          border: Border.all(color: c.withOpacity(0.4)),
+        ),
+        child: Row(mainAxisSize: MainAxisSize.min, children: [
+          Container(width: 6, height: 6,
+              decoration: BoxDecoration(color: c, shape: BoxShape.circle)),
+          const SizedBox(width: 5),
+          Text(t, style: TextStyle(fontSize: 10,
+              fontWeight: FontWeight.w800, color: c, letterSpacing: 1.5)),
+        ]),
+      ),
     );
   }
 
-  // ── Gauge (tap to start/stop) ──
+  // ── Arc Gauge Meter ──────────────────────────────────────────────────────
 
-  Widget _gauge() {
+  Widget _buildGaugeMeter() {
+    return Center(
+      child: AnimatedBuilder(
+        animation: Listenable.merge([_pulseCtrl, _glowCtrl]),
+        builder: (_, __) {
+          final ratio = (_displaySpeed / _maxScale).clamp(0.0, 1.0);
+          final glowIntensity = _ctrl.state == TestState.running
+              ? 0.6 + 0.4 * _glowCtrl.value : 0.4;
+          return SizedBox(
+            width: 280, height: 200,
+            child: CustomPaint(
+              painter: GaugePainter(
+                ratio: ratio,
+                isRunning: _ctrl.state == TestState.running,
+                glowIntensity: glowIntensity,
+                pulseValue: _pulseCtrl.value,
+              ),
+            ),
+          );
+        },
+      ),
+    );
+  }
+
+  // ── Speed Display ─────────────────────────────────────────────────────────
+
+  Widget _buildSpeedDisplay() {
+    final speed = _displaySpeed;
+    return Column(children: [
+      TweenAnimationBuilder<double>(
+        tween: Tween(begin: 0, end: speed),
+        duration: const Duration(milliseconds: 400),
+        builder: (_, v, __) => Text(
+          v.toStringAsFixed(1),
+          style: const TextStyle(
+            fontSize: 72,
+            fontWeight: FontWeight.w900,
+            color: Colors.white,
+            height: 1,
+            letterSpacing: -3,
+          ),
+        ),
+      ),
+      const SizedBox(height: 4),
+      const Text('Mbps',
+          style: TextStyle(fontSize: 14, color: _textSub,
+              letterSpacing: 3, fontWeight: FontWeight.w600)),
+    ]);
+  }
+
+  // ── Start / Stop Button ──────────────────────────────────────────────────
+
+  Widget _buildStartButton() {
     final isRunning = _ctrl.state == TestState.running;
-    final speed     = _ctrl.state == TestState.done
-        ? _ctrl.avgMbps : _ctrl.speedMbps;
+    final isDone    = _ctrl.state == TestState.done;
+    final isError   = _ctrl.state == TestState.error;
+
+    String label; Color c1; Color c2; IconData icon;
+    if (isRunning) {
+      label = 'STOP'; c1 = const Color(0xFFFF5252);
+      c2 = const Color(0xFFFF1744); icon = Icons.stop_rounded;
+    } else if (isDone || isError) {
+      label = 'TEST AGAIN'; c1 = _accentA;
+      c2 = _accentB; icon = Icons.refresh_rounded;
+    } else {
+      label = 'START'; c1 = _accentA;
+      c2 = _accentB; icon = Icons.play_arrow_rounded;
+    }
 
     return Center(
       child: GestureDetector(
         onTap: _ctrl.toggle,
         child: AnimatedBuilder(
-          animation: _pulseAnim,
+          animation: _pulseCtrl,
           builder: (_, child) => Transform.scale(
-            scale: isRunning ? _pulseAnim.value : 1.0,
+            scale: isRunning ? 0.97 + 0.03 * _pulseCtrl.value : 1.0,
             child: child,
           ),
           child: Container(
-            width: 220, height: 220,
+            height: 56,
+            width: 200,
             decoration: BoxDecoration(
-              shape: BoxShape.circle,
-              color: _surface,
-              border: Border.all(color: _stateColor.withOpacity(0.5), width: 2),
+              borderRadius: BorderRadius.circular(28),
+              gradient: LinearGradient(colors: [c1, c2],
+                  begin: Alignment.topLeft, end: Alignment.bottomRight),
               boxShadow: [
-                BoxShadow(color: _stateColor.withOpacity(0.18),
-                    blurRadius: 48, spreadRadius: 6),
+                BoxShadow(color: c1.withOpacity(isRunning ? 0.6 : 0.35),
+                    blurRadius: isRunning ? 24 : 16,
+                    offset: const Offset(0, 6)),
               ],
             ),
-            child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
-              // Speed number
-              Text(speed.toStringAsFixed(1),
-                  style: TextStyle(fontSize: 56,
-                      fontWeight: FontWeight.w800,
-                      color: _stateColor,
-                      height: 1, letterSpacing: -2)),
-              const SizedBox(height: 4),
-              Text('Mbps', style: TextStyle(fontSize: 13,
-                  color: _textSub, letterSpacing: 1.5,
-                  fontWeight: FontWeight.w500)),
-              const SizedBox(height: 10),
-              // Hint label inside gauge
-              AnimatedSwitcher(
-                duration: const Duration(milliseconds: 250),
-                child: _gaugeHint(),
-              ),
+            child: Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+              Icon(icon, color: Colors.white, size: 22),
+              const SizedBox(width: 8),
+              Text(label, style: const TextStyle(
+                  fontSize: 15, fontWeight: FontWeight.w800,
+                  color: Colors.white, letterSpacing: 2)),
             ]),
           ),
         ),
@@ -343,145 +445,150 @@ class _SpeedPageState extends State<SpeedPage>
     );
   }
 
-  Widget _gaugeHint() {
-    switch (_ctrl.state) {
-      case TestState.idle:
-        return Container(
-          key: const ValueKey('idle'),
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 5),
-          decoration: BoxDecoration(
-            color: _accent.withOpacity(0.12),
-            borderRadius: BorderRadius.circular(20),
-            border: Border.all(color: _accent.withOpacity(0.3)),
-          ),
-          child: const Text('▶  Start',
-              style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700,
-                  color: _accent)),
-        );
-      case TestState.running:
-        return Container(
-          key: const ValueKey('running'),
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 5),
-          decoration: BoxDecoration(
-            color: Colors.white.withOpacity(0.05),
-            borderRadius: BorderRadius.circular(20),
-          ),
-          child: Text('■  Stop',
-              style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600,
-                  color: _textSub)),
-        );
-      case TestState.done:
-        return Container(
-          key: const ValueKey('done'),
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 5),
-          decoration: BoxDecoration(
-            color: const Color(0xFF30D158).withOpacity(0.1),
-            borderRadius: BorderRadius.circular(20),
-          ),
-          child: const Text('↺  Again',
-              style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600,
-                  color: Color(0xFF30D158))),
-        );
-      default:
-        return Container(
-          key: const ValueKey('err'),
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 5),
-          decoration: BoxDecoration(
-            color: const Color(0xFFFF453A).withOpacity(0.1),
-            borderRadius: BorderRadius.circular(20),
-          ),
-          child: const Text('↺  Retry',
-              style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600,
-                  color: Color(0xFFFF453A))),
-        );
-    }
-  }
+  // ── Stats Row ─────────────────────────────────────────────────────────────
 
-  // ── Progress bar ──
-
-  Widget _progressRow() {
-    final isRunning = _ctrl.state == TestState.running;
-    final elapsed   = (_ctrl.elapsedMs / 1000)
-        .clamp(0.0, _ctrl.duration.toDouble());
-
-    return Column(children: [
-      ClipRRect(
-        borderRadius: BorderRadius.circular(4),
-        child: LinearProgressIndicator(
-          value: _ctrl.progress, minHeight: 4,
-          backgroundColor: _border,
-          valueColor: AlwaysStoppedAnimation(_stateColor),
-        ),
-      ),
-      const SizedBox(height: 8),
-      Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
-        Text(
-          isRunning
-              ? '${elapsed.toStringAsFixed(1)}s / ${_ctrl.duration}s'
-              : '${_ctrl.duration}s',
-          style: const TextStyle(fontSize: 12, color: _textSub)),
-        Text(_fmtBytes(_ctrl.bytesTotal),
-            style: const TextStyle(fontSize: 12, color: _textSub)),
-      ]),
-    ]);
-  }
-
-  // ── Stats ──
-
-  Widget _statsRow() {
+  Widget _buildStatsRow() {
     return Row(children: [
-      _stat('Live',  '${_ctrl.speedMbps.toStringAsFixed(1)}', _accent),
+      _statCard('LIVE', '${_ctrl.speedMbps.toStringAsFixed(1)}', _accentA,
+          Icons.bolt_rounded),
       const SizedBox(width: 10),
-      _stat('Peak',  '${_ctrl.peakMbps.toStringAsFixed(1)}', const Color(0xFFFFD60A)),
+      _statCard('PEAK', '${_ctrl.peakMbps.toStringAsFixed(1)}', _yellow,
+          Icons.trending_up_rounded),
       const SizedBox(width: 10),
-      _stat('Avg',
-          _ctrl.state == TestState.done
-              ? _ctrl.avgMbps.toStringAsFixed(1) : '--',
-          const Color(0xFF30D158)),
+      _statCard('AVG', _ctrl.state == TestState.done
+          ? _ctrl.avgMbps.toStringAsFixed(1) : '--', _green,
+          Icons.equalizer_rounded),
     ]);
   }
 
-  Widget _stat(String label, String value, Color color) {
+  Widget _statCard(String label, String value, Color color, IconData icon) {
     return Expanded(
       child: Container(
         padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 12),
-        decoration: BoxDecoration(color: _surface,
-            borderRadius: BorderRadius.circular(12),
-            border: Border.all(color: _border)),
+        decoration: BoxDecoration(
+          color: _surface,
+          borderRadius: BorderRadius.circular(14),
+          border: Border.all(color: _border),
+          boxShadow: [BoxShadow(color: color.withOpacity(0.08),
+              blurRadius: 16, spreadRadius: -2)],
+        ),
         child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          Text(value, style: TextStyle(fontSize: 17,
-              fontWeight: FontWeight.w700, color: color)),
-          const SizedBox(height: 3),
-          Text('$label (Mbps)',
-              style: const TextStyle(fontSize: 10, color: _textSub)),
+          Row(children: [
+            Icon(icon, size: 13, color: color),
+            const SizedBox(width: 4),
+            Text(label, style: TextStyle(fontSize: 9,
+                fontWeight: FontWeight.w800, color: color, letterSpacing: 1.5)),
+          ]),
+          const SizedBox(height: 6),
+          Text(value, style: TextStyle(fontSize: 20,
+              fontWeight: FontWeight.w800, color: color, height: 1)),
+          Text('Mbps', style: const TextStyle(fontSize: 9, color: _textSub)),
         ]),
       ),
     );
   }
 
-  // ── Selector ──
+  // ── Progress Bar ──────────────────────────────────────────────────────────
 
-  Widget _selector(String label, String display,
+  Widget _buildProgressBar() {
+    final isRunning = _ctrl.state == TestState.running;
+    final elapsed   = (_ctrl.elapsedMs / 1000)
+        .clamp(0.0, _ctrl.duration.toDouble());
+
+    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+        Text('PROGRESS', style: const TextStyle(fontSize: 10,
+            fontWeight: FontWeight.w700, color: _textSub, letterSpacing: 1.5)),
+        Text(isRunning
+            ? '${elapsed.toStringAsFixed(1)}s / ${_ctrl.duration}s'
+            : _fmtBytes(_ctrl.bytesTotal),
+            style: const TextStyle(fontSize: 10, color: _textSub)),
+      ]),
+      const SizedBox(height: 8),
+      Stack(children: [
+        Container(height: 6,
+            decoration: BoxDecoration(
+                color: _border, borderRadius: BorderRadius.circular(3))),
+        AnimatedContainer(
+          duration: const Duration(milliseconds: 200),
+          height: 6,
+          width: (MediaQuery.of(context).size.width - 40) * _ctrl.progress,
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(3),
+            gradient: const LinearGradient(colors: [_accentA, _accentB]),
+            boxShadow: [BoxShadow(color: _accentA.withOpacity(0.5),
+                blurRadius: 6)],
+          ),
+        ),
+      ]),
+    ]);
+  }
+
+  // ── Sparkline ─────────────────────────────────────────────────────────────
+
+  Widget _buildSparkline() {
+    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      const Text('SPEED HISTORY', style: TextStyle(fontSize: 10,
+          fontWeight: FontWeight.w700, color: _textSub, letterSpacing: 1.5)),
+      const SizedBox(height: 8),
+      Container(
+        height: 60,
+        decoration: BoxDecoration(
+          color: _surface,
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(color: _border),
+        ),
+        child: ClipRRect(
+          borderRadius: BorderRadius.circular(12),
+          child: CustomPaint(
+            painter: SparklinePainter(samples: _ctrl.history),
+            size: const Size(double.infinity, 60),
+          ),
+        ),
+      ),
+    ]);
+  }
+
+  // ── Settings ──────────────────────────────────────────────────────────────
+
+  Widget _buildSettings() {
+    return Column(children: [
+      _settingRow('THREADS', '${_ctrl.threads}',
+          _ctrl.threads.toDouble(), 1, 32,
+          [4, 8, 16, 32], _ctrl.threads,
+          (v) => _ctrl.setThreads(v.round()), _ctrl.setThreads),
+      const SizedBox(height: 12),
+      _settingRow('DURATION', '${_ctrl.duration}s',
+          _ctrl.duration.toDouble(), 5, 30,
+          [5, 10, 15, 30], _ctrl.duration,
+          (v) => _ctrl.setDuration(v.round()), _ctrl.setDuration),
+    ]);
+  }
+
+  Widget _settingRow(String label, String display,
       double val, double min, double max,
       List<int> presets, int selected,
       ValueChanged<double> onSlider, ValueChanged<int> onPreset) {
     final disabled = _ctrl.state == TestState.running;
     return Container(
       padding: const EdgeInsets.fromLTRB(16, 14, 16, 10),
-      decoration: BoxDecoration(color: _surface,
-          borderRadius: BorderRadius.circular(12),
-          border: Border.all(color: _border)),
+      decoration: BoxDecoration(
+        color: _surface,
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: _border),
+      ),
       child: Column(children: [
         Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
-          Text(label, style: const TextStyle(fontSize: 13,
-              fontWeight: FontWeight.w600, color: Colors.white)),
+          Text(label, style: const TextStyle(fontSize: 11,
+              fontWeight: FontWeight.w800, color: _textSub, letterSpacing: 1.5)),
           Container(
             padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 3),
             decoration: BoxDecoration(
-                color: _accent.withOpacity(0.12),
-                borderRadius: BorderRadius.circular(6)),
-            child: Text(display, style: const TextStyle(fontSize: 13,
-                fontWeight: FontWeight.w700, color: _accent)),
+                color: _accentA.withOpacity(0.1),
+                borderRadius: BorderRadius.circular(6),
+                border: Border.all(color: _accentA.withOpacity(0.25))),
+            child: Text(display, style: const TextStyle(fontSize: 12,
+                fontWeight: FontWeight.w800, color: _accentA)),
           ),
         ]),
         Slider(value: val, min: min, max: max,
@@ -494,17 +601,18 @@ class _SpeedPageState extends State<SpeedPage>
                 padding: const EdgeInsets.only(left: 6),
                 child: GestureDetector(
                   onTap: disabled ? null : () => onPreset(t),
-                  child: Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                  child: AnimatedContainer(
+                    duration: const Duration(milliseconds: 200),
+                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
                     decoration: BoxDecoration(
-                      color: sel ? _accent.withOpacity(0.15) : Colors.transparent,
+                      color: sel ? _accentA.withOpacity(0.15) : Colors.transparent,
                       borderRadius: BorderRadius.circular(6),
                       border: Border.all(
-                          color: sel ? _accent.withOpacity(0.5) : _border),
+                          color: sel ? _accentA.withOpacity(0.5) : _textDim),
                     ),
                     child: Text('$t', style: TextStyle(fontSize: 11,
-                        fontWeight: FontWeight.w600,
-                        color: sel ? _accent : _textSub)),
+                        fontWeight: FontWeight.w700,
+                        color: sel ? _accentA : _textSub)),
                   ),
                 ),
               );
@@ -512,4 +620,187 @@ class _SpeedPageState extends State<SpeedPage>
       ]),
     );
   }
+}
+
+// ── Gauge Painter ─────────────────────────────────────────────────────────────
+
+class GaugePainter extends CustomPainter {
+  final double ratio;
+  final bool   isRunning;
+  final double glowIntensity;
+  final double pulseValue;
+
+  const GaugePainter({
+    required this.ratio,
+    required this.isRunning,
+    required this.glowIntensity,
+    required this.pulseValue,
+  });
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final cx = size.width / 2;
+    final cy = size.height * 0.88;
+    final r  = size.width * 0.44;
+
+    const startAngle = math.pi;
+    const sweepFull  = math.pi;
+
+    // ── Background arc ──
+    final bgPaint = Paint()
+      ..color = const Color(0xFF1A2540)
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 16
+      ..strokeCap = StrokeCap.round;
+    canvas.drawArc(
+        Rect.fromCircle(center: Offset(cx, cy), radius: r),
+        startAngle, sweepFull, false, bgPaint);
+
+    // ── Tick marks ──
+    _drawTicks(canvas, cx, cy, r);
+
+    // ── Speed arc ──
+    if (ratio > 0) {
+      final sweep = sweepFull * ratio;
+      final arcColor = _arcColor(ratio);
+
+      // glow
+      final glowPaint = Paint()
+        ..shader = SweepGradient(
+          startAngle: startAngle,
+          endAngle: startAngle + sweep,
+          colors: [arcColor.withOpacity(0), arcColor.withOpacity(glowIntensity * 0.5)],
+        ).createShader(Rect.fromCircle(center: Offset(cx, cy), radius: r))
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 30
+        ..strokeCap = StrokeCap.round
+        ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 14);
+      canvas.drawArc(Rect.fromCircle(center: Offset(cx, cy), radius: r),
+          startAngle, sweep, false, glowPaint);
+
+      // main arc
+      final arcPaint = Paint()
+        ..shader = _arcShader(ratio, startAngle, sweep, cx, cy, r)
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 16
+        ..strokeCap = StrokeCap.round;
+      canvas.drawArc(Rect.fromCircle(center: Offset(cx, cy), radius: r),
+          startAngle, sweep, false, arcPaint);
+
+      // tip dot
+      final tipAngle = startAngle + sweep;
+      final tipX = cx + r * math.cos(tipAngle);
+      final tipY = cy + r * math.sin(tipAngle);
+      canvas.drawCircle(Offset(tipX, tipY), 7,
+          Paint()..color = arcColor
+            ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 6));
+      canvas.drawCircle(Offset(tipX, tipY), 5,
+          Paint()..color = Colors.white);
+    }
+
+    // ── Labels ──
+    _drawLabels(canvas, cx, cy, r);
+  }
+
+  Color _arcColor(double ratio) {
+    if (ratio < 0.4) return const Color(0xFF00C2FF);
+    if (ratio < 0.75) return const Color(0xFF00E0FF);
+    return const Color(0xFF00FFCC);
+  }
+
+  Shader _arcShader(double ratio, double start, double sweep, double cx, double cy, double r) {
+    return SweepGradient(
+      startAngle: start,
+      endAngle: start + sweep,
+      colors: const [Color(0xFF0066FF), Color(0xFF00C2FF), Color(0xFF00FFD0)],
+    ).createShader(Rect.fromCircle(center: Offset(cx, cy), radius: r));
+  }
+
+  void _drawTicks(Canvas canvas, double cx, double cy, double r) {
+    const total = 10;
+    for (int i = 0; i <= total; i++) {
+      final angle = math.pi + (math.pi * i / total);
+      final isMajor = i % 5 == 0;
+      final inner = r - (isMajor ? 14 : 8);
+      final x1 = cx + (r + 2) * math.cos(angle);
+      final y1 = cy + (r + 2) * math.sin(angle);
+      final x2 = cx + inner * math.cos(angle);
+      final y2 = cy + inner * math.sin(angle);
+      canvas.drawLine(Offset(x1, y1), Offset(x2, y2),
+          Paint()
+            ..color = isMajor
+                ? const Color(0xFF2D4570)
+                : const Color(0xFF1E2E48)
+            ..strokeWidth = isMajor ? 2 : 1
+            ..strokeCap = StrokeCap.round);
+    }
+  }
+
+  void _drawLabels(Canvas canvas, double cx, double cy, double r) {
+    final labels = {0: '0', 0.25: '250', 0.5: '500', 0.75: '750', 1.0: '1G'};
+    labels.forEach((ratio, text) {
+      final angle = math.pi + math.pi * ratio;
+      final lx = cx + (r - 28) * math.cos(angle);
+      final ly = cy + (r - 28) * math.sin(angle);
+      final tp = TextPainter(
+        text: TextSpan(text: text,
+            style: const TextStyle(fontSize: 9, color: Color(0xFF3A5070),
+                fontWeight: FontWeight.w700)),
+        textDirection: TextDirection.ltr,
+      )..layout();
+      tp.paint(canvas, Offset(lx - tp.width / 2, ly - tp.height / 2));
+    });
+  }
+
+  @override
+  bool shouldRepaint(GaugePainter old) =>
+      old.ratio != ratio || old.isRunning != isRunning ||
+      old.glowIntensity != glowIntensity;
+}
+
+// ── Sparkline Painter ─────────────────────────────────────────────────────────
+
+class SparklinePainter extends CustomPainter {
+  final List<double> samples;
+  const SparklinePainter({required this.samples});
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    if (samples.length < 2) return;
+    final maxV = samples.reduce(math.max).clamp(1.0, double.infinity);
+    final pts = <Offset>[];
+    for (int i = 0; i < samples.length; i++) {
+      final x = size.width * i / (samples.length - 1);
+      final y = size.height - (samples[i] / maxV) * size.height * 0.85;
+      pts.add(Offset(x, y));
+    }
+    final path = Path()..moveTo(pts.first.dx, pts.first.dy);
+    for (int i = 1; i < pts.length; i++) {
+      final prev = pts[i - 1];
+      final curr = pts[i];
+      final cp1 = Offset((prev.dx + curr.dx) / 2, prev.dy);
+      final cp2 = Offset((prev.dx + curr.dx) / 2, curr.dy);
+      path.cubicTo(cp1.dx, cp1.dy, cp2.dx, cp2.dy, curr.dx, curr.dy);
+    }
+    // fill
+    final fillPath = Path.from(path)
+      ..lineTo(size.width, size.height)
+      ..lineTo(0, size.height)
+      ..close();
+    canvas.drawPath(fillPath, Paint()
+      ..shader = LinearGradient(
+        colors: [const Color(0xFF00C2FF).withOpacity(0.3), Colors.transparent],
+        begin: Alignment.topCenter, end: Alignment.bottomCenter,
+      ).createShader(Offset.zero & size)
+      ..style = PaintingStyle.fill);
+    // line
+    canvas.drawPath(path, Paint()
+      ..color = const Color(0xFF00C2FF)
+      ..strokeWidth = 1.5
+      ..style = PaintingStyle.stroke
+      ..strokeCap = StrokeCap.round);
+  }
+
+  @override
+  bool shouldRepaint(SparklinePainter old) => old.samples.length != samples.length;
 }
