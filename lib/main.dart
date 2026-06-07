@@ -11,19 +11,26 @@ void main() {
 
 // ── Colors ────────────────────────────────────────────────────────────────────
 
-const Color _bg        = Color(0xFF0A0E1A);
-const Color _surface   = Color(0xFF121828);
-const Color _border    = Color(0xFF1E2740);
-const Color _accentA   = Color(0xFF00C2FF);   // cyan
-const Color _accentB   = Color(0xFF0066FF);   // blue
-const Color _green     = Color(0xFF00E676);
-const Color _yellow    = Color(0xFFFFD740);
-const Color _red       = Color(0xFFFF5252);
-const Color _textSub   = Color(0xFF5A7090);
-const Color _textDim   = Color(0xFF2D4060);
+const Color _bg      = Color(0xFF0A0E1A);
+const Color _surface = Color(0xFF121828);
+const Color _border  = Color(0xFF1E2740);
+const Color _accentA = Color(0xFF00C2FF);
+const Color _accentB = Color(0xFF0066FF);
+const Color _green   = Color(0xFF00E676);
+const Color _yellow  = Color(0xFFFFD740);
+const Color _red     = Color(0xFFFF5252);
+const Color _textSub = Color(0xFF5A7090);
 
-const String _testUrl  = 'https://ash-speed.hetzner.com/100MB.bin';
-const double _maxScale = 1000.0; // gauge max Mbps
+const String _testUrl = 'https://ash-speed.hetzner.com/100MB.bin';
+
+// ── Dynamic gauge scale ───────────────────────────────────────────────────────
+
+double _scaleForSpeed(double mbps) {
+  if (mbps >= 500) return 1000;
+  if (mbps >= 100) return 500;
+  if (mbps >= 50)  return 100;
+  return 50;
+}
 
 // ── State ─────────────────────────────────────────────────────────────────────
 
@@ -35,17 +42,16 @@ class SpeedController extends ChangeNotifier {
   TestState state    = TestState.idle;
   int       threads  = 8;
   int       duration = 10;
-  double speedMbps = 0, peakMbps = 0, avgMbps = 0;
-  double progress  = 0;
-  int bytesTotal = 0, elapsedMs = 0;
-  String? error;
-  final List<double> history = [];   // live speed samples for sparkline
+  double    speedMbps = 0, peakMbps = 0, avgMbps = 0;
+  double    progress  = 0;
+  int       bytesTotal = 0, elapsedMs = 0;
+  String?   error;
 
   final List<http.Client> _clients = [];
-  Timer? _ticker, _stopper;
-  int _lastBytes = 0;
+  Timer?   _ticker, _stopper;
+  int      _lastBytes = 0;
   DateTime? _start;
-  bool _cancelled = false;
+  bool     _cancelled = false;
 
   void setThreads(int v)  { if (state != TestState.running) { threads  = v; notifyListeners(); } }
   void setDuration(int v) { if (state != TestState.running) { duration = v; notifyListeners(); } }
@@ -100,7 +106,6 @@ class SpeedController extends ChangeNotifier {
     if (speedMbps > peakMbps) peakMbps = speedMbps;
     elapsedMs = DateTime.now().difference(_start!).inMilliseconds;
     progress  = (elapsedMs / (duration * 1000)).clamp(0.0, 1.0);
-    history.add(speedMbps);
     notifyListeners();
   }
 
@@ -134,7 +139,6 @@ class SpeedController extends ChangeNotifier {
     bytesTotal = elapsedMs = 0;
     error      = null;
     _lastBytes = 0;
-    history.clear();
   }
 
   void reset() {
@@ -160,13 +164,6 @@ class STDApp extends StatelessWidget {
       theme: ThemeData.dark().copyWith(
         scaffoldBackgroundColor: _bg,
         colorScheme: const ColorScheme.dark(primary: _accentA, surface: _surface),
-        sliderTheme: SliderThemeData(
-          activeTrackColor: _accentA,
-          inactiveTrackColor: _border,
-          thumbColor: _accentA,
-          overlayColor: _accentA.withOpacity(0.15),
-          trackHeight: 3,
-        ),
       ),
       home: const SpeedPage(),
     );
@@ -181,49 +178,76 @@ class SpeedPage extends StatefulWidget {
   State<SpeedPage> createState() => _SpeedPageState();
 }
 
-class _SpeedPageState extends State<SpeedPage>
-    with TickerProviderStateMixin {
+class _SpeedPageState extends State<SpeedPage> with TickerProviderStateMixin {
 
   final SpeedController _ctrl = SpeedController();
-  late AnimationController _needleCtrl;
+
   late AnimationController _pulseCtrl;
   late AnimationController _glowCtrl;
-  double _displaySpeed = 0;
+  late AnimationController _scaleAnimCtrl;
+  late Animation<double>   _scaleAnim;
+
+  double _gaugeScale     = 50;   // current displayed scale
+  double _targetScale    = 50;   // where we're animating toward
+  double _displaySpeed   = 0;
 
   @override
   void initState() {
     super.initState();
     _ctrl.addListener(_onUpdate);
 
-    _needleCtrl = AnimationController(vsync: this,
+    _pulseCtrl = AnimationController(vsync: this,
+        duration: const Duration(milliseconds: 1400))..repeat(reverse: true);
+
+    _glowCtrl = AnimationController(vsync: this,
+        duration: const Duration(milliseconds: 900))..repeat(reverse: true);
+
+    _scaleAnimCtrl = AnimationController(vsync: this,
         duration: const Duration(milliseconds: 600));
-    _pulseCtrl  = AnimationController(vsync: this,
-        duration: const Duration(milliseconds: 1600))
-      ..repeat(reverse: true);
-    _glowCtrl   = AnimationController(vsync: this,
-        duration: const Duration(milliseconds: 900))
-      ..repeat(reverse: true);
+    _scaleAnim = Tween<double>(begin: 50, end: 50).animate(
+        CurvedAnimation(parent: _scaleAnimCtrl, curve: Curves.easeInOut));
+    _scaleAnim.addListener(() {
+      setState(() { _gaugeScale = _scaleAnim.value; });
+    });
   }
 
   void _onUpdate() {
-    final target = _ctrl.state == TestState.done
+    final speed = _ctrl.state == TestState.done
         ? _ctrl.avgMbps : _ctrl.speedMbps;
-    setState(() { _displaySpeed = target; });
+    setState(() { _displaySpeed = speed; });
+
+    if (_ctrl.state == TestState.running) {
+      final needed = _scaleForSpeed(_ctrl.peakMbps);
+      if (needed != _targetScale) {
+        _targetScale = needed;
+        _scaleAnim = Tween<double>(begin: _gaugeScale, end: needed).animate(
+            CurvedAnimation(parent: _scaleAnimCtrl, curve: Curves.easeInOut));
+        _scaleAnimCtrl
+          ..reset()
+          ..forward();
+      }
+    }
+    if (_ctrl.state == TestState.idle) {
+      _targetScale = 50;
+      _gaugeScale  = 50;
+    }
   }
 
   @override
   void dispose() {
     _ctrl.dispose();
-    _needleCtrl.dispose();
     _pulseCtrl.dispose();
     _glowCtrl.dispose();
+    _scaleAnimCtrl.dispose();
     super.dispose();
   }
 
-  String _fmtBytes(int b) {
-    if (b < 1048576)    return '${(b / 1024).toStringAsFixed(1)} KB';
-    if (b < 1073741824) return '${(b / 1048576).toStringAsFixed(1)} MB';
-    return '${(b / 1073741824).toStringAsFixed(2)} GB';
+  void _openSettings() {
+    showDialog(
+      context: context,
+      barrierColor: Colors.black.withOpacity(0.6),
+      builder: (_) => _SettingsDialog(ctrl: _ctrl),
+    );
   }
 
   @override
@@ -235,41 +259,43 @@ class _SpeedPageState extends State<SpeedPage>
         body: Container(
           decoration: const BoxDecoration(
             gradient: RadialGradient(
-              center: Alignment(0, -0.4),
-              radius: 1.2,
+              center: Alignment(0, -0.5),
+              radius: 1.1,
               colors: [Color(0xFF0D1830), Color(0xFF0A0E1A)],
             ),
           ),
           child: SafeArea(
-            child: SingleChildScrollView(
-              padding: const EdgeInsets.fromLTRB(20, 16, 20, 32),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  _buildHeader(),
-                  const SizedBox(height: 32),
-                  _buildGaugeMeter(),
-                  const SizedBox(height: 28),
-                  _buildSpeedDisplay(),
-                  const SizedBox(height: 20),
-                  _buildStartButton(),
-                  const SizedBox(height: 24),
-                  _buildStatsRow(),
-                  const SizedBox(height: 20),
-                  _buildProgressBar(),
-                  if (_ctrl.history.length > 2) ...[
-                    const SizedBox(height: 20),
-                    _buildSparkline(),
-                  ],
-                  const SizedBox(height: 20),
-                  _buildSettings(),
-                  if (_ctrl.state == TestState.error) ...[
-                    const SizedBox(height: 16),
-                    Center(child: Text(_ctrl.error ?? 'Unknown error',
-                        style: const TextStyle(fontSize: 12, color: _red))),
-                  ],
-                ],
-              ),
+            child: Column(
+              children: [
+                _buildHeader(),
+                Expanded(
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 24),
+                    child: Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        const Spacer(flex: 1),
+                        _buildGaugeMeter(),
+                        const SizedBox(height: 12),
+                        _buildSpeedDisplay(),
+                        const Spacer(flex: 1),
+                        _buildStartButton(),
+                        const SizedBox(height: 32),
+                        _buildStatsRow(),
+                        const Spacer(flex: 1),
+                        _buildProgressBar(),
+                        const SizedBox(height: 32),
+                        if (_ctrl.state == TestState.error)
+                          Padding(
+                            padding: const EdgeInsets.only(bottom: 16),
+                            child: Text(_ctrl.error ?? 'Unknown error',
+                                style: const TextStyle(fontSize: 12, color: _red)),
+                          ),
+                      ],
+                    ),
+                  ),
+                ),
+              ],
             ),
           ),
         ),
@@ -280,181 +306,136 @@ class _SpeedPageState extends State<SpeedPage>
   // ── Header ────────────────────────────────────────────────────────────────
 
   Widget _buildHeader() {
-    return Row(children: [
-      Container(
-        width: 36, height: 36,
-        decoration: BoxDecoration(
-          shape: BoxShape.circle,
-          gradient: const LinearGradient(
-              colors: [_accentA, _accentB],
-              begin: Alignment.topLeft, end: Alignment.bottomRight),
-          boxShadow: [BoxShadow(color: _accentA.withOpacity(0.4),
-              blurRadius: 12)],
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(20, 14, 12, 0),
+      child: Row(children: [
+        Container(
+          width: 32, height: 32,
+          decoration: BoxDecoration(
+            shape: BoxShape.circle,
+            gradient: const LinearGradient(
+                colors: [_accentA, _accentB],
+                begin: Alignment.topLeft, end: Alignment.bottomRight),
+            boxShadow: [BoxShadow(color: _accentA.withOpacity(0.35), blurRadius: 10)],
+          ),
+          child: const Icon(Icons.speed_rounded, color: Colors.white, size: 18),
         ),
-        child: const Icon(Icons.speed_rounded, color: Colors.white, size: 20),
-      ),
-      const SizedBox(width: 10),
-      const Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        Text('SPEED TEST',
-            style: TextStyle(fontSize: 16, fontWeight: FontWeight.w900,
+        const SizedBox(width: 10),
+        const Text('SPEED TEST',
+            style: TextStyle(fontSize: 14, fontWeight: FontWeight.w900,
                 color: Colors.white, letterSpacing: 2.5)),
-        Text('Download Speed Meter',
-            style: TextStyle(fontSize: 10, color: _textSub, letterSpacing: 0.5)),
-      ]),
-      const Spacer(),
-      _buildStatusChip(),
-    ]);
-  }
-
-  Widget _buildStatusChip() {
-    Color c; String t;
-    switch (_ctrl.state) {
-      case TestState.running: c = _accentA; t = 'LIVE';   break;
-      case TestState.done:    c = _green;   t = 'DONE';   break;
-      case TestState.error:   c = _red;     t = 'ERROR';  break;
-      default:                c = _textSub; t = 'READY';
-    }
-    return AnimatedBuilder(
-      animation: _pulseCtrl,
-      builder: (_, child) => Opacity(
-        opacity: _ctrl.state == TestState.running
-            ? 0.6 + 0.4 * _pulseCtrl.value : 1.0,
-        child: child,
-      ),
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-        decoration: BoxDecoration(
-          color: c.withOpacity(0.12),
-          borderRadius: BorderRadius.circular(20),
-          border: Border.all(color: c.withOpacity(0.4)),
+        const Spacer(),
+        IconButton(
+          onPressed: _openSettings,
+          icon: const Icon(Icons.tune_rounded, color: _textSub, size: 22),
+          tooltip: 'Settings',
         ),
-        child: Row(mainAxisSize: MainAxisSize.min, children: [
-          Container(width: 6, height: 6,
-              decoration: BoxDecoration(color: c, shape: BoxShape.circle)),
-          const SizedBox(width: 5),
-          Text(t, style: TextStyle(fontSize: 10,
-              fontWeight: FontWeight.w800, color: c, letterSpacing: 1.5)),
-        ]),
-      ),
+      ]),
     );
   }
 
-  // ── Arc Gauge Meter ──────────────────────────────────────────────────────
+  // ── Arc Gauge ─────────────────────────────────────────────────────────────
 
   Widget _buildGaugeMeter() {
-    return Center(
-      child: AnimatedBuilder(
-        animation: Listenable.merge([_pulseCtrl, _glowCtrl]),
-        builder: (_, __) {
-          final ratio = (_displaySpeed / _maxScale).clamp(0.0, 1.0);
-          final glowIntensity = _ctrl.state == TestState.running
-              ? 0.6 + 0.4 * _glowCtrl.value : 0.4;
-          return SizedBox(
-            width: 280, height: 200,
-            child: CustomPaint(
-              painter: GaugePainter(
-                ratio: ratio,
-                isRunning: _ctrl.state == TestState.running,
-                glowIntensity: glowIntensity,
-                pulseValue: _pulseCtrl.value,
-              ),
+    return AnimatedBuilder(
+      animation: Listenable.merge([_glowCtrl]),
+      builder: (_, __) {
+        final ratio = (_displaySpeed / _gaugeScale).clamp(0.0, 1.0);
+        final glowI = _ctrl.state == TestState.running
+            ? 0.55 + 0.45 * _glowCtrl.value : 0.3;
+        return SizedBox(
+          width: 300, height: 180,
+          child: CustomPaint(
+            painter: GaugePainter(
+              ratio: ratio,
+              maxScale: _gaugeScale,
+              isRunning: _ctrl.state == TestState.running,
+              glowIntensity: glowI,
             ),
-          );
-        },
-      ),
+          ),
+        );
+      },
     );
   }
 
-  // ── Speed Display ─────────────────────────────────────────────────────────
+  // ── Speed number ──────────────────────────────────────────────────────────
 
   Widget _buildSpeedDisplay() {
-    final speed = _displaySpeed;
     return Column(children: [
       TweenAnimationBuilder<double>(
-        tween: Tween(begin: 0, end: speed),
-        duration: const Duration(milliseconds: 400),
+        tween: Tween(begin: 0, end: _displaySpeed),
+        duration: const Duration(milliseconds: 350),
         builder: (_, v, __) => Text(
           v.toStringAsFixed(1),
           style: const TextStyle(
-            fontSize: 72,
-            fontWeight: FontWeight.w900,
-            color: Colors.white,
-            height: 1,
-            letterSpacing: -3,
+            fontSize: 68, fontWeight: FontWeight.w900,
+            color: Colors.white, height: 1, letterSpacing: -3,
           ),
         ),
       ),
-      const SizedBox(height: 4),
-      const Text('Mbps',
-          style: TextStyle(fontSize: 14, color: _textSub,
-              letterSpacing: 3, fontWeight: FontWeight.w600)),
+      const Text('Mbps', style: TextStyle(fontSize: 13, color: _textSub,
+          letterSpacing: 3, fontWeight: FontWeight.w600)),
     ]);
   }
 
-  // ── Start / Stop Button ──────────────────────────────────────────────────
+  // ── Start / Stop button ───────────────────────────────────────────────────
 
   Widget _buildStartButton() {
     final isRunning = _ctrl.state == TestState.running;
-    final isDone    = _ctrl.state == TestState.done;
-    final isError   = _ctrl.state == TestState.error;
+    final isRetry   = _ctrl.state == TestState.done || _ctrl.state == TestState.error;
 
-    String label; Color c1; Color c2; IconData icon;
+    final String label;
+    final Color  c1, c2;
+    final IconData icon;
+
     if (isRunning) {
-      label = 'STOP'; c1 = const Color(0xFFFF5252);
-      c2 = const Color(0xFFFF1744); icon = Icons.stop_rounded;
-    } else if (isDone || isError) {
-      label = 'TEST AGAIN'; c1 = _accentA;
-      c2 = _accentB; icon = Icons.refresh_rounded;
+      label = 'STOP'; c1 = _red; c2 = const Color(0xFFFF1744);
+      icon  = Icons.stop_rounded;
+    } else if (isRetry) {
+      label = 'TEST AGAIN'; c1 = _accentA; c2 = _accentB;
+      icon  = Icons.refresh_rounded;
     } else {
-      label = 'START'; c1 = _accentA;
-      c2 = _accentB; icon = Icons.play_arrow_rounded;
+      label = 'START'; c1 = _accentA; c2 = _accentB;
+      icon  = Icons.play_arrow_rounded;
     }
 
-    return Center(
+    return AnimatedBuilder(
+      animation: _pulseCtrl,
+      builder: (_, child) => Transform.scale(
+        scale: isRunning ? 0.97 + 0.03 * _pulseCtrl.value : 1.0,
+        child: child,
+      ),
       child: GestureDetector(
         onTap: _ctrl.toggle,
-        child: AnimatedBuilder(
-          animation: _pulseCtrl,
-          builder: (_, child) => Transform.scale(
-            scale: isRunning ? 0.97 + 0.03 * _pulseCtrl.value : 1.0,
-            child: child,
+        child: Container(
+          height: 56, width: 200,
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(28),
+            gradient: LinearGradient(colors: [c1, c2],
+                begin: Alignment.topLeft, end: Alignment.bottomRight),
+            boxShadow: [BoxShadow(
+                color: c1.withOpacity(isRunning ? 0.65 : 0.35),
+                blurRadius: isRunning ? 26 : 18,
+                offset: const Offset(0, 6))],
           ),
-          child: Container(
-            height: 56,
-            width: 200,
-            decoration: BoxDecoration(
-              borderRadius: BorderRadius.circular(28),
-              gradient: LinearGradient(colors: [c1, c2],
-                  begin: Alignment.topLeft, end: Alignment.bottomRight),
-              boxShadow: [
-                BoxShadow(color: c1.withOpacity(isRunning ? 0.6 : 0.35),
-                    blurRadius: isRunning ? 24 : 16,
-                    offset: const Offset(0, 6)),
-              ],
-            ),
-            child: Row(mainAxisAlignment: MainAxisAlignment.center, children: [
-              Icon(icon, color: Colors.white, size: 22),
-              const SizedBox(width: 8),
-              Text(label, style: const TextStyle(
-                  fontSize: 15, fontWeight: FontWeight.w800,
-                  color: Colors.white, letterSpacing: 2)),
-            ]),
-          ),
+          child: Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+            Icon(icon, color: Colors.white, size: 22),
+            const SizedBox(width: 8),
+            Text(label, style: const TextStyle(fontSize: 14,
+                fontWeight: FontWeight.w800, color: Colors.white, letterSpacing: 1.5)),
+          ]),
         ),
       ),
     );
   }
 
-  // ── Stats Row ─────────────────────────────────────────────────────────────
+  // ── Peak & Avg stats ──────────────────────────────────────────────────────
 
   Widget _buildStatsRow() {
     return Row(children: [
-      _statCard('LIVE', '${_ctrl.speedMbps.toStringAsFixed(1)}', _accentA,
-          Icons.bolt_rounded),
-      const SizedBox(width: 10),
       _statCard('PEAK', '${_ctrl.peakMbps.toStringAsFixed(1)}', _yellow,
           Icons.trending_up_rounded),
-      const SizedBox(width: 10),
+      const SizedBox(width: 12),
       _statCard('AVG', _ctrl.state == TestState.done
           ? _ctrl.avgMbps.toStringAsFixed(1) : '--', _green,
           Icons.equalizer_rounded),
@@ -464,31 +445,31 @@ class _SpeedPageState extends State<SpeedPage>
   Widget _statCard(String label, String value, Color color, IconData icon) {
     return Expanded(
       child: Container(
-        padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 12),
+        padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 16),
         decoration: BoxDecoration(
           color: _surface,
           borderRadius: BorderRadius.circular(14),
           border: Border.all(color: _border),
-          boxShadow: [BoxShadow(color: color.withOpacity(0.08),
+          boxShadow: [BoxShadow(color: color.withOpacity(0.07),
               blurRadius: 16, spreadRadius: -2)],
         ),
         child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
           Row(children: [
-            Icon(icon, size: 13, color: color),
-            const SizedBox(width: 4),
+            Icon(icon, size: 12, color: color),
+            const SizedBox(width: 5),
             Text(label, style: TextStyle(fontSize: 9,
                 fontWeight: FontWeight.w800, color: color, letterSpacing: 1.5)),
           ]),
           const SizedBox(height: 6),
-          Text(value, style: TextStyle(fontSize: 20,
+          Text(value, style: TextStyle(fontSize: 22,
               fontWeight: FontWeight.w800, color: color, height: 1)),
-          Text('Mbps', style: const TextStyle(fontSize: 9, color: _textSub)),
+          const Text('Mbps', style: TextStyle(fontSize: 9, color: _textSub)),
         ]),
       ),
     );
   }
 
-  // ── Progress Bar ──────────────────────────────────────────────────────────
+  // ── Progress bar ──────────────────────────────────────────────────────────
 
   Widget _buildProgressBar() {
     final isRunning = _ctrl.state == TestState.running;
@@ -497,128 +478,198 @@ class _SpeedPageState extends State<SpeedPage>
 
     return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
       Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
-        Text('PROGRESS', style: const TextStyle(fontSize: 10,
-            fontWeight: FontWeight.w700, color: _textSub, letterSpacing: 1.5)),
         Text(isRunning
             ? '${elapsed.toStringAsFixed(1)}s / ${_ctrl.duration}s'
-            : _fmtBytes(_ctrl.bytesTotal),
+            : _ctrl.state == TestState.idle ? '' : '${_ctrl.duration}s',
+            style: const TextStyle(fontSize: 10, color: _textSub)),
+        Text(_ctrl.bytesTotal > 0 ? _fmtBytes(_ctrl.bytesTotal) : '',
             style: const TextStyle(fontSize: 10, color: _textSub)),
       ]),
-      const SizedBox(height: 8),
-      Stack(children: [
-        Container(height: 6,
+      const SizedBox(height: 6),
+      ClipRRect(
+        borderRadius: BorderRadius.circular(3),
+        child: Stack(children: [
+          Container(height: 5, color: _border),
+          AnimatedContainer(
+            duration: const Duration(milliseconds: 200),
+            height: 5,
+            width: (MediaQuery.of(context).size.width - 48) * _ctrl.progress,
             decoration: BoxDecoration(
-                color: _border, borderRadius: BorderRadius.circular(3))),
-        AnimatedContainer(
-          duration: const Duration(milliseconds: 200),
-          height: 6,
-          width: (MediaQuery.of(context).size.width - 40) * _ctrl.progress,
-          decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(3),
-            gradient: const LinearGradient(colors: [_accentA, _accentB]),
-            boxShadow: [BoxShadow(color: _accentA.withOpacity(0.5),
-                blurRadius: 6)],
-          ),
-        ),
-      ]),
-    ]);
-  }
-
-  // ── Sparkline ─────────────────────────────────────────────────────────────
-
-  Widget _buildSparkline() {
-    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-      const Text('SPEED HISTORY', style: TextStyle(fontSize: 10,
-          fontWeight: FontWeight.w700, color: _textSub, letterSpacing: 1.5)),
-      const SizedBox(height: 8),
-      Container(
-        height: 60,
-        decoration: BoxDecoration(
-          color: _surface,
-          borderRadius: BorderRadius.circular(12),
-          border: Border.all(color: _border),
-        ),
-        child: ClipRRect(
-          borderRadius: BorderRadius.circular(12),
-          child: CustomPaint(
-            painter: SparklinePainter(samples: _ctrl.history),
-            size: const Size(double.infinity, 60),
-          ),
-        ),
-      ),
-    ]);
-  }
-
-  // ── Settings ──────────────────────────────────────────────────────────────
-
-  Widget _buildSettings() {
-    return Column(children: [
-      _settingRow('THREADS', '${_ctrl.threads}',
-          _ctrl.threads.toDouble(), 1, 32,
-          [4, 8, 16, 32], _ctrl.threads,
-          (v) => _ctrl.setThreads(v.round()), _ctrl.setThreads),
-      const SizedBox(height: 12),
-      _settingRow('DURATION', '${_ctrl.duration}s',
-          _ctrl.duration.toDouble(), 5, 30,
-          [5, 10, 15, 30], _ctrl.duration,
-          (v) => _ctrl.setDuration(v.round()), _ctrl.setDuration),
-    ]);
-  }
-
-  Widget _settingRow(String label, String display,
-      double val, double min, double max,
-      List<int> presets, int selected,
-      ValueChanged<double> onSlider, ValueChanged<int> onPreset) {
-    final disabled = _ctrl.state == TestState.running;
-    return Container(
-      padding: const EdgeInsets.fromLTRB(16, 14, 16, 10),
-      decoration: BoxDecoration(
-        color: _surface,
-        borderRadius: BorderRadius.circular(14),
-        border: Border.all(color: _border),
-      ),
-      child: Column(children: [
-        Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
-          Text(label, style: const TextStyle(fontSize: 11,
-              fontWeight: FontWeight.w800, color: _textSub, letterSpacing: 1.5)),
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 3),
-            decoration: BoxDecoration(
-                color: _accentA.withOpacity(0.1),
-                borderRadius: BorderRadius.circular(6),
-                border: Border.all(color: _accentA.withOpacity(0.25))),
-            child: Text(display, style: const TextStyle(fontSize: 12,
-                fontWeight: FontWeight.w800, color: _accentA)),
+              gradient: const LinearGradient(colors: [_accentA, _accentB]),
+              boxShadow: [BoxShadow(color: _accentA.withOpacity(0.5), blurRadius: 6)],
+            ),
           ),
         ]),
-        Slider(value: val, min: min, max: max,
-            divisions: (max - min).round(),
-            onChanged: disabled ? null : onSlider),
-        Row(mainAxisAlignment: MainAxisAlignment.end,
-            children: presets.map((t) {
-              final sel = selected == t;
-              return Padding(
-                padding: const EdgeInsets.only(left: 6),
-                child: GestureDetector(
-                  onTap: disabled ? null : () => onPreset(t),
-                  child: AnimatedContainer(
-                    duration: const Duration(milliseconds: 200),
-                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                    decoration: BoxDecoration(
-                      color: sel ? _accentA.withOpacity(0.15) : Colors.transparent,
-                      borderRadius: BorderRadius.circular(6),
-                      border: Border.all(
-                          color: sel ? _accentA.withOpacity(0.5) : _textDim),
-                    ),
-                    child: Text('$t', style: TextStyle(fontSize: 11,
-                        fontWeight: FontWeight.w700,
-                        color: sel ? _accentA : _textSub)),
-                  ),
-                ),
-              );
-            }).toList()),
-      ]),
+      ),
+    ]);
+  }
+
+  String _fmtBytes(int b) {
+    if (b < 1048576)    return '${(b / 1024).toStringAsFixed(1)} KB';
+    if (b < 1073741824) return '${(b / 1048576).toStringAsFixed(1)} MB';
+    return '${(b / 1073741824).toStringAsFixed(2)} GB';
+  }
+}
+
+// ── Settings Dialog ───────────────────────────────────────────────────────────
+
+class _SettingsDialog extends StatefulWidget {
+  final SpeedController ctrl;
+  const _SettingsDialog({required this.ctrl});
+  @override
+  State<_SettingsDialog> createState() => _SettingsDialogState();
+}
+
+class _SettingsDialogState extends State<_SettingsDialog> {
+  late int _threads;
+  late int _duration;
+
+  @override
+  void initState() {
+    super.initState();
+    _threads  = widget.ctrl.threads;
+    _duration = widget.ctrl.duration;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Dialog(
+      backgroundColor: Colors.transparent,
+      child: Container(
+        padding: const EdgeInsets.all(24),
+        decoration: BoxDecoration(
+          color: const Color(0xFF121828),
+          borderRadius: BorderRadius.circular(20),
+          border: Border.all(color: const Color(0xFF1E2740)),
+          boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.6),
+              blurRadius: 40, spreadRadius: 8)],
+        ),
+        child: Column(mainAxisSize: MainAxisSize.min, children: [
+          // Title
+          Row(children: [
+            const Icon(Icons.tune_rounded, color: _accentA, size: 18),
+            const SizedBox(width: 8),
+            const Text('Settings', style: TextStyle(fontSize: 16,
+                fontWeight: FontWeight.w800, color: Colors.white)),
+            const Spacer(),
+            GestureDetector(
+              onTap: () => Navigator.of(context).pop(),
+              child: const Icon(Icons.close_rounded, color: _textSub, size: 20),
+            ),
+          ]),
+          const SizedBox(height: 24),
+
+          // Threads
+          _buildSetting(
+            label: 'Threads',
+            value: '$_threads',
+            sliderVal: _threads.toDouble(),
+            min: 1, max: 32,
+            presets: [4, 8, 16, 32],
+            selected: _threads,
+            onSlider: (v) => setState(() => _threads = v.round()),
+            onPreset: (v) => setState(() => _threads = v),
+          ),
+          const SizedBox(height: 20),
+
+          // Duration
+          _buildSetting(
+            label: 'Duration',
+            value: '${_duration}s',
+            sliderVal: _duration.toDouble(),
+            min: 5, max: 30,
+            presets: [5, 10, 15, 30],
+            selected: _duration,
+            onSlider: (v) => setState(() => _duration = v.round()),
+            onPreset: (v) => setState(() => _duration = v),
+          ),
+          const SizedBox(height: 28),
+
+          // Apply button
+          GestureDetector(
+            onTap: () {
+              widget.ctrl.setThreads(_threads);
+              widget.ctrl.setDuration(_duration);
+              Navigator.of(context).pop();
+            },
+            child: Container(
+              height: 48,
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(12),
+                gradient: const LinearGradient(
+                    colors: [_accentA, _accentB],
+                    begin: Alignment.topLeft, end: Alignment.bottomRight),
+                boxShadow: [BoxShadow(color: _accentA.withOpacity(0.3),
+                    blurRadius: 14, offset: const Offset(0, 4))],
+              ),
+              child: const Center(
+                child: Text('Apply', style: TextStyle(fontSize: 14,
+                    fontWeight: FontWeight.w800, color: Colors.white,
+                    letterSpacing: 1)),
+              ),
+            ),
+          ),
+        ]),
+      ),
     );
+  }
+
+  Widget _buildSetting({
+    required String label, required String value,
+    required double sliderVal, required double min, required double max,
+    required List<int> presets, required int selected,
+    required ValueChanged<double> onSlider, required ValueChanged<int> onPreset,
+  }) {
+    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+        Text(label, style: const TextStyle(fontSize: 12,
+            fontWeight: FontWeight.w700, color: Colors.white)),
+        Container(
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 3),
+          decoration: BoxDecoration(
+            color: _accentA.withOpacity(0.1),
+            borderRadius: BorderRadius.circular(6),
+            border: Border.all(color: _accentA.withOpacity(0.25)),
+          ),
+          child: Text(value, style: const TextStyle(fontSize: 12,
+              fontWeight: FontWeight.w800, color: _accentA)),
+        ),
+      ]),
+      SliderTheme(
+        data: SliderTheme.of(context).copyWith(
+          activeTrackColor: _accentA,
+          inactiveTrackColor: const Color(0xFF1E2740),
+          thumbColor: _accentA,
+          overlayColor: _accentA.withOpacity(0.15),
+          trackHeight: 3,
+        ),
+        child: Slider(value: sliderVal, min: min, max: max,
+            divisions: (max - min).round(), onChanged: onSlider),
+      ),
+      Row(mainAxisAlignment: MainAxisAlignment.end,
+          children: presets.map((t) {
+            final sel = selected == t;
+            return Padding(
+              padding: const EdgeInsets.only(left: 8),
+              child: GestureDetector(
+                onTap: () => onPreset(t),
+                child: AnimatedContainer(
+                  duration: const Duration(milliseconds: 180),
+                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                  decoration: BoxDecoration(
+                    color: sel ? _accentA.withOpacity(0.15) : Colors.transparent,
+                    borderRadius: BorderRadius.circular(6),
+                    border: Border.all(
+                        color: sel ? _accentA.withOpacity(0.5) : const Color(0xFF2D4060)),
+                  ),
+                  child: Text('$t', style: TextStyle(fontSize: 11,
+                      fontWeight: FontWeight.w700,
+                      color: sel ? _accentA : _textSub)),
+                ),
+              ),
+            );
+          }).toList()),
+    ]);
   }
 }
 
@@ -626,125 +677,122 @@ class _SpeedPageState extends State<SpeedPage>
 
 class GaugePainter extends CustomPainter {
   final double ratio;
+  final double maxScale;
   final bool   isRunning;
   final double glowIntensity;
-  final double pulseValue;
 
   const GaugePainter({
     required this.ratio,
+    required this.maxScale,
     required this.isRunning,
     required this.glowIntensity,
-    required this.pulseValue,
   });
 
   @override
   void paint(Canvas canvas, Size size) {
     final cx = size.width / 2;
-    final cy = size.height * 0.88;
-    final r  = size.width * 0.44;
+    final cy = size.height * 0.92;
+    final r  = size.width * 0.43;
 
     const startAngle = math.pi;
     const sweepFull  = math.pi;
 
-    // ── Background arc ──
-    final bgPaint = Paint()
-      ..color = const Color(0xFF1A2540)
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 16
-      ..strokeCap = StrokeCap.round;
+    // background arc
     canvas.drawArc(
-        Rect.fromCircle(center: Offset(cx, cy), radius: r),
-        startAngle, sweepFull, false, bgPaint);
+      Rect.fromCircle(center: Offset(cx, cy), radius: r),
+      startAngle, sweepFull, false,
+      Paint()
+        ..color = const Color(0xFF1A2540)
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 14
+        ..strokeCap = StrokeCap.round,
+    );
 
-    // ── Tick marks ──
     _drawTicks(canvas, cx, cy, r);
 
-    // ── Speed arc ──
     if (ratio > 0) {
       final sweep = sweepFull * ratio;
-      final arcColor = _arcColor(ratio);
 
       // glow
-      final glowPaint = Paint()
-        ..shader = SweepGradient(
-          startAngle: startAngle,
-          endAngle: startAngle + sweep,
-          colors: [arcColor.withOpacity(0), arcColor.withOpacity(glowIntensity * 0.5)],
-        ).createShader(Rect.fromCircle(center: Offset(cx, cy), radius: r))
-        ..style = PaintingStyle.stroke
-        ..strokeWidth = 30
-        ..strokeCap = StrokeCap.round
-        ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 14);
-      canvas.drawArc(Rect.fromCircle(center: Offset(cx, cy), radius: r),
-          startAngle, sweep, false, glowPaint);
+      canvas.drawArc(
+        Rect.fromCircle(center: Offset(cx, cy), radius: r),
+        startAngle, sweep, false,
+        Paint()
+          ..shader = SweepGradient(
+            startAngle: startAngle,
+            endAngle: startAngle + sweep,
+            colors: [
+              const Color(0xFF0066FF).withOpacity(0),
+              const Color(0xFF00C2FF).withOpacity(glowIntensity * 0.55),
+            ],
+          ).createShader(Rect.fromCircle(center: Offset(cx, cy), radius: r))
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 28
+          ..strokeCap = StrokeCap.round
+          ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 12),
+      );
 
       // main arc
-      final arcPaint = Paint()
-        ..shader = _arcShader(ratio, startAngle, sweep, cx, cy, r)
-        ..style = PaintingStyle.stroke
-        ..strokeWidth = 16
-        ..strokeCap = StrokeCap.round;
-      canvas.drawArc(Rect.fromCircle(center: Offset(cx, cy), radius: r),
-          startAngle, sweep, false, arcPaint);
+      canvas.drawArc(
+        Rect.fromCircle(center: Offset(cx, cy), radius: r),
+        startAngle, sweep, false,
+        Paint()
+          ..shader = SweepGradient(
+            startAngle: startAngle,
+            endAngle: startAngle + sweep,
+            colors: const [Color(0xFF0066FF), Color(0xFF00C2FF), Color(0xFF00FFD0)],
+          ).createShader(Rect.fromCircle(center: Offset(cx, cy), radius: r))
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 14
+          ..strokeCap = StrokeCap.round,
+      );
 
       // tip dot
       final tipAngle = startAngle + sweep;
       final tipX = cx + r * math.cos(tipAngle);
       final tipY = cy + r * math.sin(tipAngle);
-      canvas.drawCircle(Offset(tipX, tipY), 7,
-          Paint()..color = arcColor
-            ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 6));
-      canvas.drawCircle(Offset(tipX, tipY), 5,
-          Paint()..color = Colors.white);
+      canvas.drawCircle(Offset(tipX, tipY), 6,
+          Paint()..color = const Color(0xFF00C2FF)
+            ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 5));
+      canvas.drawCircle(Offset(tipX, tipY), 4, Paint()..color = Colors.white);
     }
 
-    // ── Labels ──
     _drawLabels(canvas, cx, cy, r);
-  }
-
-  Color _arcColor(double ratio) {
-    if (ratio < 0.4) return const Color(0xFF00C2FF);
-    if (ratio < 0.75) return const Color(0xFF00E0FF);
-    return const Color(0xFF00FFCC);
-  }
-
-  Shader _arcShader(double ratio, double start, double sweep, double cx, double cy, double r) {
-    return SweepGradient(
-      startAngle: start,
-      endAngle: start + sweep,
-      colors: const [Color(0xFF0066FF), Color(0xFF00C2FF), Color(0xFF00FFD0)],
-    ).createShader(Rect.fromCircle(center: Offset(cx, cy), radius: r));
   }
 
   void _drawTicks(Canvas canvas, double cx, double cy, double r) {
     const total = 10;
     for (int i = 0; i <= total; i++) {
-      final angle = math.pi + (math.pi * i / total);
+      final angle  = math.pi + (math.pi * i / total);
       final isMajor = i % 5 == 0;
-      final inner = r - (isMajor ? 14 : 8);
-      final x1 = cx + (r + 2) * math.cos(angle);
-      final y1 = cy + (r + 2) * math.sin(angle);
-      final x2 = cx + inner * math.cos(angle);
-      final y2 = cy + inner * math.sin(angle);
-      canvas.drawLine(Offset(x1, y1), Offset(x2, y2),
-          Paint()
-            ..color = isMajor
-                ? const Color(0xFF2D4570)
-                : const Color(0xFF1E2E48)
-            ..strokeWidth = isMajor ? 2 : 1
-            ..strokeCap = StrokeCap.round);
+      final inner  = r - (isMajor ? 12 : 7);
+      canvas.drawLine(
+        Offset(cx + (r + 2) * math.cos(angle), cy + (r + 2) * math.sin(angle)),
+        Offset(cx + inner * math.cos(angle),    cy + inner * math.sin(angle)),
+        Paint()
+          ..color = isMajor ? const Color(0xFF2D4570) : const Color(0xFF1E2E48)
+          ..strokeWidth = isMajor ? 2 : 1
+          ..strokeCap = StrokeCap.round,
+      );
     }
   }
 
   void _drawLabels(Canvas canvas, double cx, double cy, double r) {
-    final labels = {0: '0', 0.25: '250', 0.5: '500', 0.75: '750', 1.0: '1G'};
-    labels.forEach((ratio, text) {
-      final angle = math.pi + math.pi * ratio;
-      final lx = cx + (r - 28) * math.cos(angle);
-      final ly = cy + (r - 28) * math.sin(angle);
+    // Show 0, 25%, 50%, 75%, 100% of current maxScale
+    final Map<double, String> labels = {
+      0.0:  '0',
+      0.25: _fmtScale(maxScale * 0.25),
+      0.5:  _fmtScale(maxScale * 0.5),
+      0.75: _fmtScale(maxScale * 0.75),
+      1.0:  _fmtScale(maxScale),
+    };
+    labels.forEach((frac, text) {
+      final angle = math.pi + math.pi * frac;
+      final lx = cx + (r - 24) * math.cos(angle);
+      final ly = cy + (r - 24) * math.sin(angle);
       final tp = TextPainter(
         text: TextSpan(text: text,
-            style: const TextStyle(fontSize: 9, color: Color(0xFF3A5070),
+            style: const TextStyle(fontSize: 8.5, color: Color(0xFF3A5070),
                 fontWeight: FontWeight.w700)),
         textDirection: TextDirection.ltr,
       )..layout();
@@ -752,55 +800,14 @@ class GaugePainter extends CustomPainter {
     });
   }
 
-  @override
-  bool shouldRepaint(GaugePainter old) =>
-      old.ratio != ratio || old.isRunning != isRunning ||
-      old.glowIntensity != glowIntensity;
-}
-
-// ── Sparkline Painter ─────────────────────────────────────────────────────────
-
-class SparklinePainter extends CustomPainter {
-  final List<double> samples;
-  const SparklinePainter({required this.samples});
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    if (samples.length < 2) return;
-    final maxV = samples.reduce(math.max).clamp(1.0, double.infinity);
-    final pts = <Offset>[];
-    for (int i = 0; i < samples.length; i++) {
-      final x = size.width * i / (samples.length - 1);
-      final y = size.height - (samples[i] / maxV) * size.height * 0.85;
-      pts.add(Offset(x, y));
-    }
-    final path = Path()..moveTo(pts.first.dx, pts.first.dy);
-    for (int i = 1; i < pts.length; i++) {
-      final prev = pts[i - 1];
-      final curr = pts[i];
-      final cp1 = Offset((prev.dx + curr.dx) / 2, prev.dy);
-      final cp2 = Offset((prev.dx + curr.dx) / 2, curr.dy);
-      path.cubicTo(cp1.dx, cp1.dy, cp2.dx, cp2.dy, curr.dx, curr.dy);
-    }
-    // fill
-    final fillPath = Path.from(path)
-      ..lineTo(size.width, size.height)
-      ..lineTo(0, size.height)
-      ..close();
-    canvas.drawPath(fillPath, Paint()
-      ..shader = LinearGradient(
-        colors: [const Color(0xFF00C2FF).withOpacity(0.3), Colors.transparent],
-        begin: Alignment.topCenter, end: Alignment.bottomCenter,
-      ).createShader(Offset.zero & size)
-      ..style = PaintingStyle.fill);
-    // line
-    canvas.drawPath(path, Paint()
-      ..color = const Color(0xFF00C2FF)
-      ..strokeWidth = 1.5
-      ..style = PaintingStyle.stroke
-      ..strokeCap = StrokeCap.round);
+  String _fmtScale(double v) {
+    if (v >= 1000) return '1G';
+    if (v >= 100 && v == v.truncateToDouble()) return '${v.toInt()}';
+    return v < 10 ? v.toStringAsFixed(1) : '${v.toInt()}';
   }
 
   @override
-  bool shouldRepaint(SparklinePainter old) => old.samples.length != samples.length;
+  bool shouldRepaint(GaugePainter old) =>
+      old.ratio != ratio || old.maxScale != maxScale ||
+      old.glowIntensity != glowIntensity;
 }
